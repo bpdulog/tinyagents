@@ -207,11 +207,17 @@ static TOOL_CALL_TAG_RE: LazyLock<Regex> =
 /// output — which the base parser already handles — and P-Format pipe args are
 /// untouched.
 static DSML_CALLS_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>(.*?)(?:</[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>|<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*/calls?\s*>|</tool_call>|$)").unwrap()
+    Regex::new(
+        r"(?is)<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>(.*?)(?:</[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>|<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*/calls?\s*>|</tool_call>|$)",
+    )
+    .unwrap()
 });
 
 static DSML_INVOKE_OPEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s+name\s*=\s*"([^"]+)"[^>]*>"#).unwrap()
+    Regex::new(
+        r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s+name\s*=\s*"([^"]+)"[^>]*>"#,
+    )
+    .unwrap()
 });
 
 static DSML_INVOKE_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -219,7 +225,10 @@ static DSML_INVOKE_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static DSML_PARAMETER_OPEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter(?:\s+name\s*=\s*"([^"]*)")?[^>]*>"#).unwrap()
+    Regex::new(
+        r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter(?:\s+name\s*=\s*"([^"]*)")?[^>]*>"#,
+    )
+    .unwrap()
 });
 
 static DSML_PARAMETER_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
