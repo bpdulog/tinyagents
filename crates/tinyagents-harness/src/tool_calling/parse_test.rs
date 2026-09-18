@@ -655,4 +655,3 @@ fn dsml_with_pformat_registry_recovers_cleanly() {
     assert_eq!(calls[0].name, "GMAIL_FETCH_EMAILS");
     assert_eq!(calls[0].arguments["max_results"], 3);
 }
-
