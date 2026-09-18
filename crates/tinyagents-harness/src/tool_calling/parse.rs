@@ -210,12 +210,20 @@ static DSML_CALLS_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>(.*?)(?:</[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>|<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*/calls?\s*>|</tool_call>|$)").unwrap()
 });
 
-static DSML_INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s+name\s*=\s*"([^"]+)"\s*>(.*?)(?:</(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s*>|(?=<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke)|</tool_call>|$)"#).unwrap()
+static DSML_INVOKE_OPEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s+name\s*=\s*"([^"]+)"[^>]*>"#).unwrap()
 });
 
-static DSML_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter(?:\s+name\s*=\s*"([^"]*)")?[^>]*>(.*?)(?:</(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter\s*>|(?=<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter)|$)"#).unwrap()
+static DSML_INVOKE_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)</(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s*>|</tool_call>").unwrap()
+});
+
+static DSML_PARAMETER_OPEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter(?:\s+name\s*=\s*"([^"]*)")?[^>]*>"#).unwrap()
+});
+
+static DSML_PARAMETER_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)</(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter\s*>").unwrap()
 });
 
 /// Parse arguments from a DSML `<invoke>` block body.
@@ -225,10 +233,21 @@ static DSML_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// 2. Direct JSON object bodies (when the model omits `<parameter>` tags or emits only a closing `</parameter>` tag).
 /// 3. Empty bodies (`{}`).
 fn parse_dsml_invoke_arguments(body: &str) -> serde_json::Value {
+    let param_matches: Vec<_> = DSML_PARAMETER_OPEN_RE.captures_iter(body).collect();
     let mut named_params = Vec::new();
-    for p in DSML_PARAMETER_RE.captures_iter(body) {
-        let name = p.get(1).map(|m| m.as_str().trim()).unwrap_or("");
-        let val = p.get(2).map(|m| m.as_str().trim()).unwrap_or("");
+    for (i, cap) in param_matches.iter().enumerate() {
+        let name = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        let start = cap.get(0).unwrap().end();
+        let end = if i + 1 < param_matches.len() {
+            param_matches[i + 1].get(0).unwrap().start()
+        } else {
+            body.len()
+        };
+        let mut raw_val = &body[start..end];
+        if let Some(close_m) = DSML_PARAMETER_CLOSE_RE.find(raw_val) {
+            raw_val = &raw_val[..close_m.start()];
+        }
+        let val = raw_val.trim();
         if !name.is_empty() {
             named_params.push((name, val));
         }
@@ -237,10 +256,10 @@ fn parse_dsml_invoke_arguments(body: &str) -> serde_json::Value {
     if !named_params.is_empty() {
         if named_params.len() == 1 && TOOL_ARG_KEYS.contains(&named_params[0].0) {
             let val_str = named_params[0].1;
-            if let Some((json_val, _)) = extract_first_json_value_with_end(val_str) {
-                if json_val.is_object() {
-                    return json_val;
-                }
+            if let Some((json_val, _)) = extract_first_json_value_with_end(val_str)
+                && json_val.is_object()
+            {
+                return json_val;
             }
             if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val_str) {
                 if json_val.is_object() {
@@ -259,10 +278,10 @@ fn parse_dsml_invoke_arguments(body: &str) -> serde_json::Value {
     }
 
     // Bare JSON object directly inside invoke body (with or without unclosed parameter tags)
-    if let Some((json_val, _)) = extract_first_json_value_with_end(body) {
-        if json_val.is_object() {
-            return json_val;
-        }
+    if let Some((json_val, _)) = extract_first_json_value_with_end(body)
+        && json_val.is_object()
+    {
+        return json_val;
     }
 
     let trimmed = body.trim();
@@ -302,14 +321,25 @@ fn normalize_dsml_tool_calls(s: &str) -> Cow<'_, str> {
             .map(|m| m.as_str())
             .unwrap_or("");
 
+        let invoke_matches: Vec<_> = DSML_INVOKE_OPEN_RE.captures_iter(inner).collect();
         let mut recovered_any = false;
-        for inv_cap in DSML_INVOKE_RE.captures_iter(inner) {
+        for (i, inv_cap) in invoke_matches.iter().enumerate() {
             let name = inv_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
             if name.is_empty() {
                 continue;
             }
-            let body = inv_cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            let arguments = parse_dsml_invoke_arguments(body);
+            let body_start = inv_cap.get(0).unwrap().end();
+            let body_end = if i + 1 < invoke_matches.len() {
+                invoke_matches[i + 1].get(0).unwrap().start()
+            } else {
+                inner.len()
+            };
+            let mut raw_body = &inner[body_start..body_end];
+            if let Some(close_m) = DSML_INVOKE_CLOSE_RE.find(raw_body) {
+                raw_body = &raw_body[..close_m.start()];
+            }
+
+            let arguments = parse_dsml_invoke_arguments(raw_body);
 
             let payload = serde_json::json!({
                 "name": name,
