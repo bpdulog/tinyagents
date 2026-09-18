@@ -206,23 +206,152 @@ static TOOL_CALL_TAG_RE: LazyLock<Regex> =
 /// `Borrowed` no-op unless a *piped* tag is actually present, so well-formed
 /// output — which the base parser already handles — and P-Format pipe args are
 /// untouched.
-fn normalize_garbled_tool_call_tags(s: &str) -> Cow<'_, str> {
-    // Garbling always leaks a `|` into a tag; no `|` anywhere → nothing to do.
-    if !s.contains('|') {
+static DSML_CALLS_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>(.*?)(?:</[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*calls?\s*>|<[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*/calls?\s*>|</tool_call>|$)").unwrap()
+});
+
+static DSML_INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s+name\s*=\s*"([^"]+)"\s*>(.*?)(?:</(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke\s*>|(?=<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?invoke)|</tool_call>|$)"#).unwrap()
+});
+
+static DSML_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter(?:\s+name\s*=\s*"([^"]*)")?[^>]*>(.*?)(?:</(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter\s*>|(?=<(?:[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*)?parameter)|$)"#).unwrap()
+});
+
+/// Parse arguments from a DSML `<invoke>` block body.
+///
+/// Handles:
+/// 1. `<parameter name="...">value</parameter>` tags (single `arguments` envelope or multiple named params).
+/// 2. Direct JSON object bodies (when the model omits `<parameter>` tags or emits only a closing `</parameter>` tag).
+/// 3. Empty bodies (`{}`).
+fn parse_dsml_invoke_arguments(body: &str) -> serde_json::Value {
+    let mut named_params = Vec::new();
+    for p in DSML_PARAMETER_RE.captures_iter(body) {
+        let name = p.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        let val = p.get(2).map(|m| m.as_str().trim()).unwrap_or("");
+        if !name.is_empty() {
+            named_params.push((name, val));
+        }
+    }
+
+    if !named_params.is_empty() {
+        if named_params.len() == 1 && TOOL_ARG_KEYS.contains(&named_params[0].0) {
+            let val_str = named_params[0].1;
+            if let Some((json_val, _)) = extract_first_json_value_with_end(val_str) {
+                if json_val.is_object() {
+                    return json_val;
+                }
+            }
+            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val_str) {
+                if json_val.is_object() {
+                    return json_val;
+                }
+                return serde_json::json!({ named_params[0].0: json_val });
+            }
+            return serde_json::json!({ named_params[0].0: val_str });
+        }
+
+        let mut map = serde_json::Map::new();
+        for (pname, pval_str) in named_params {
+            map.insert(pname.to_string(), parameter_scalar_value(pval_str));
+        }
+        return serde_json::Value::Object(map);
+    }
+
+    // Bare JSON object directly inside invoke body (with or without unclosed parameter tags)
+    if let Some((json_val, _)) = extract_first_json_value_with_end(body) {
+        if json_val.is_object() {
+            return json_val;
+        }
+    }
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return serde_json::Value::Object(serde_json::Map::new());
+    }
+
+    serde_json::json!({ "input": trimmed })
+}
+
+/// Normalize DeepSeek DSML tool calls (`<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="...">...</｜｜DSML｜｜ calls>`)
+/// into canonical `<tool_call>` tags with JSON payloads.
+///
+/// DeepSeek models (such as DeepSeek-V3, DeepSeek-V4, DeepSeek-Flash) emit DSML syntax when asked
+/// to invoke tools in text/P-Format mode. Without this normalization, OpenHuman treats DSML tags
+/// as narrative text and fails to execute the tool calls.
+fn normalize_dsml_tool_calls(s: &str) -> Cow<'_, str> {
+    if !s.contains("DSML") && !s.contains("dsml") {
         return Cow::Borrowed(s);
     }
+
+    if !DSML_CALLS_BLOCK_RE.is_match(s) {
+        return Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut cursor = 0;
+
+    for mat in DSML_CALLS_BLOCK_RE.find_iter(s) {
+        let block_start = mat.start();
+        let block_end = mat.end();
+        out.push_str(&s[cursor..block_start]);
+
+        let block_match = DSML_CALLS_BLOCK_RE.captures(&s[block_start..block_end]);
+        let inner = block_match.and_then(|c| c.get(1)).map(|m| m.as_str()).unwrap_or("");
+
+        let mut recovered_any = false;
+        for inv_cap in DSML_INVOKE_RE.captures_iter(inner) {
+            let name = inv_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            let body = inv_cap.get(2).map(|m| m.as_str()).unwrap_or("");
+            let arguments = parse_dsml_invoke_arguments(body);
+
+            let payload = serde_json::json!({
+                "name": name,
+                "arguments": arguments,
+            });
+            out.push_str("<tool_call>\n");
+            out.push_str(&payload.to_string());
+            out.push_str("\n</tool_call>");
+            recovered_any = true;
+        }
+
+        if !recovered_any {
+            out.push_str(&s[block_start..block_end]);
+        } else {
+            tinyagents_tracing::debug!(
+                "[agent_parse] normalized DeepSeek DSML tool calls into canonical <tool_call> tags"
+            );
+        }
+
+        cursor = block_end;
+    }
+
+    out.push_str(&s[cursor..]);
+    Cow::Owned(out)
+}
+
+fn normalize_garbled_tool_call_tags(s: &str) -> Cow<'_, str> {
+    let s = normalize_dsml_tool_calls(s);
+    let s_ref = s.as_ref();
+    // Garbling always leaks a `|` into a tag; no `|` anywhere → nothing to do.
+    if !s_ref.contains('|') {
+        return s;
+    }
     let tags: Vec<(usize, usize)> = TOOL_CALL_TAG_RE
-        .find_iter(s)
+        .find_iter(s_ref)
         .map(|m| (m.start(), m.end()))
         .collect();
     // Need at least one open/close pair, and at least one tag must actually be
     // garbled (contain a pipe) — otherwise the base parser handles it verbatim,
     // and P-Format `name[a|b]` args (pipes in the BODY, not the tags) are left
     // alone.
-    if tags.len() < 2 || !tags.iter().any(|&(a, b)| s[a..b].contains('|')) {
-        return Cow::Borrowed(s);
+    if tags.len() < 2 || !tags.iter().any(|&(a, b)| s_ref[a..b].contains('|')) {
+        return s;
     }
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s_ref.len());
     let mut cursor = 0usize;
     // `as_chunks::<2>()` rather than `chunks_exact(2)`: the chunk size is a
     // constant, so this hands back fixed-size arrays and the two destructurings
@@ -231,13 +360,13 @@ fn normalize_garbled_tool_call_tags(s: &str) -> Cow<'_, str> {
     for &[open, close] in tags.as_chunks::<2>().0 {
         let (open_start, open_end) = open;
         let (close_start, close_end) = close;
-        out.push_str(&s[cursor..open_start]); // text before the open tag, verbatim
+        out.push_str(&s_ref[cursor..open_start]); // text before the open tag, verbatim
         out.push_str("<tool_call>");
         // Strip the `call:` prefix, then try to recover a Kimi-family
         // `NAME{…}` argument-sentinel body into canonical JSON (#5119). When
         // the body is already canonical JSON / P-Format the recovery is a no-op
         // and the stripped body flows through unchanged.
-        let stripped = strip_call_prefix(&s[open_end..close_start]);
+        let stripped = strip_call_prefix(&s_ref[open_end..close_start]);
         match recover_sentinel_tool_call_body(stripped) {
             Some(recovered) => {
                 // Recovered a Kimi-family `NAME{…}` sentinel body into canonical
@@ -269,7 +398,7 @@ fn normalize_garbled_tool_call_tags(s: &str) -> Cow<'_, str> {
         cursor = close_end;
     }
     // Trailing text, plus any final unpaired tag, verbatim.
-    out.push_str(&s[cursor..]);
+    out.push_str(&s_ref[cursor..]);
     Cow::Owned(out)
 }
 

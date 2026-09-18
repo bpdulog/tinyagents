@@ -520,3 +520,127 @@ fn a_tagged_body_still_honours_argument_key_aliases() {
         .expect("the aliased tagged call must survive");
     assert_eq!(shell.arguments["command"], "ls");
 }
+
+// ── DeepSeek DSML tool-call format recovery ──────────────────────────────────
+
+#[test]
+fn dsml_parameter_with_arguments_envelope_parses() {
+    let response = concat!(
+        "<｜｜DSML｜｜ calls>\n",
+        "<｜｜DSML｜｜ invoke name=\"GMAIL_FETCH_EMAILS\">\n",
+        "<｜｜DSML｜｜ parameter name=\"arguments\" string=\"false\">{\"max_results\": 10, \"query\": \"in:inbox\", \"user_id\": \"me\"}</｜｜DSML｜｜ parameter>\n",
+        "</｜｜DSML｜｜ invoke>\n",
+        "</｜｜DSML｜｜ calls>"
+    );
+    let (narrative, calls) = parse_tool_calls(response);
+    assert!(narrative.is_empty());
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "GMAIL_FETCH_EMAILS");
+    assert_eq!(calls[0].arguments["max_results"], 10);
+    assert_eq!(calls[0].arguments["query"], "in:inbox");
+    assert_eq!(calls[0].arguments["user_id"], "me");
+}
+
+#[test]
+fn dsml_invoke_with_direct_json_body_parses() {
+    let response = concat!(
+        "<｜｜DSML｜｜ calls>\n",
+        "<｜｜DSML｜｜ invoke name=\"composio_list_tools\">\n",
+        "{\"toolkits\":[\"gmail\"]}\n",
+        "</｜｜DSML｜｜ invoke>\n",
+        "</｜｜DSML｜｜ calls>"
+    );
+    let (_narrative, calls) = parse_tool_calls(response);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "composio_list_tools");
+    assert_eq!(calls[0].arguments["toolkits"], serde_json::json!(["gmail"]));
+}
+
+#[test]
+fn dsml_invoke_with_orphan_closing_parameter_tag_parses() {
+    let response = concat!(
+        "<｜｜DSML｜｜ calls>\n",
+        "<｜｜DSML｜｜ invoke name=\"GMAIL_FETCH_EMAILS\">\n",
+        "{\"label_ids\": [\"INBOX\"], \"ids_only\": true, \"max_results\": 500, \"include_payload\": false, \"verbose\": false}\n",
+        "</｜｜DSML｜｜ parameter>\n",
+        "</｜｜DSML｜｜ invoke>\n",
+        "</｜｜DSML｜｜ calls>"
+    );
+    let (_narrative, calls) = parse_tool_calls(response);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "GMAIL_FETCH_EMAILS");
+    assert_eq!(calls[0].arguments["label_ids"], serde_json::json!(["INBOX"]));
+    assert_eq!(calls[0].arguments["max_results"], 500);
+}
+
+#[test]
+fn dsml_multiple_invokes_with_empty_args_and_narrative_text_parses() {
+    let response = concat!(
+        "I'll verify Gmail access by fetching the profile and listing recent inbox messages.\n\n",
+        "<｜｜DSML｜｜ calls>\n",
+        "<｜｜DSML｜｜ invoke name=\"GMAIL_GET_PROFILE\">\n\n",
+        "</｜｜DSML｜｜ invoke>\n",
+        "<｜｜DSML｜｜ invoke name=\"GMAIL_FETCH_EMAILS\">\n",
+        "{\"label_ids\": [\"INBOX\"], \"max_results\": 5, \"verbose\": false}\n",
+        "</｜｜DSML｜｜ invoke>\n",
+        "</｜｜DSML｜｜ calls>"
+    );
+    let (narrative, calls) = parse_tool_calls(response);
+    assert_eq!(
+        narrative,
+        "I'll verify Gmail access by fetching the profile and listing recent inbox messages."
+    );
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].name, "GMAIL_GET_PROFILE");
+    assert_eq!(calls[0].arguments, serde_json::json!({}));
+    assert_eq!(calls[1].name, "GMAIL_FETCH_EMAILS");
+    assert_eq!(calls[1].arguments["label_ids"], serde_json::json!(["INBOX"]));
+    assert_eq!(calls[1].arguments["max_results"], 5);
+}
+
+#[test]
+fn dsml_parameter_with_named_arguments_parses() {
+    let response = concat!(
+        "<｜｜DSML｜｜ calls>\n",
+        "<｜｜DSML｜｜ invoke name=\"composio_list_tools\">\n",
+        "<｜｜DSML｜｜ parameter name=\"toolkits\" string=\"true\">[\"twitter\"]</｜｜DSML｜｜ parameter>\n",
+        "</｜｜DSML｜｜ invoke>\n",
+        "</｜｜DSML｜｜ calls>"
+    );
+    let (_narrative, calls) = parse_tool_calls(response);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "composio_list_tools");
+    assert_eq!(calls[0].arguments["toolkits"], serde_json::json!(["twitter"]));
+}
+
+#[test]
+fn dsml_mixed_tool_call_closing_tag_parses() {
+    let response = concat!(
+        "<｜｜DSML｜｜ calls>\n",
+        "<｜｜DSML｜｜ invoke name=\"GMAIL_FETCH_EMAILS\">\n",
+        "{\"label_ids\": [\"INBOX\"], \"max_results\": 2}\n",
+        "</tool_call>"
+    );
+    let (_narrative, calls) = parse_tool_calls(response);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "GMAIL_FETCH_EMAILS");
+    assert_eq!(calls[0].arguments["label_ids"], serde_json::json!(["INBOX"]));
+    assert_eq!(calls[0].arguments["max_results"], 2);
+}
+
+#[test]
+fn dsml_with_pformat_registry_recovers_cleanly() {
+    let reg = PFormatRegistry::new();
+    let response = concat!(
+        "<｜｜DSML｜｜ calls>\n",
+        "<｜｜DSML｜｜ invoke name=\"GMAIL_FETCH_EMAILS\">\n",
+        "<｜｜DSML｜｜ parameter name=\"arguments\">{\"label_ids\": [\"INBOX\"], \"max_results\": 3}</｜｜DSML｜｜ parameter>\n",
+        "</｜｜DSML｜｜ invoke>\n",
+        "</｜｜DSML｜｜ calls>"
+    );
+    let (_narrative, calls) = parse_tool_calls_with_pformat(response, &reg);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "GMAIL_FETCH_EMAILS");
+    assert_eq!(calls[0].arguments["max_results"], 3);
+}
+
