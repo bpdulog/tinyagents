@@ -569,7 +569,10 @@ fn dsml_invoke_with_orphan_closing_parameter_tag_parses() {
     let (_narrative, calls) = parse_tool_calls(response);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "GMAIL_FETCH_EMAILS");
-    assert_eq!(calls[0].arguments["label_ids"], serde_json::json!(["INBOX"]));
+    assert_eq!(
+        calls[0].arguments["label_ids"],
+        serde_json::json!(["INBOX"])
+    );
     assert_eq!(calls[0].arguments["max_results"], 500);
 }
 
@@ -594,7 +597,10 @@ fn dsml_multiple_invokes_with_empty_args_and_narrative_text_parses() {
     assert_eq!(calls[0].name, "GMAIL_GET_PROFILE");
     assert_eq!(calls[0].arguments, serde_json::json!({}));
     assert_eq!(calls[1].name, "GMAIL_FETCH_EMAILS");
-    assert_eq!(calls[1].arguments["label_ids"], serde_json::json!(["INBOX"]));
+    assert_eq!(
+        calls[1].arguments["label_ids"],
+        serde_json::json!(["INBOX"])
+    );
     assert_eq!(calls[1].arguments["max_results"], 5);
 }
 
@@ -610,7 +616,10 @@ fn dsml_parameter_with_named_arguments_parses() {
     let (_narrative, calls) = parse_tool_calls(response);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "composio_list_tools");
-    assert_eq!(calls[0].arguments["toolkits"], serde_json::json!(["twitter"]));
+    assert_eq!(
+        calls[0].arguments["toolkits"],
+        serde_json::json!(["twitter"])
+    );
 }
 
 #[test]
@@ -624,7 +633,10 @@ fn dsml_mixed_tool_call_closing_tag_parses() {
     let (_narrative, calls) = parse_tool_calls(response);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "GMAIL_FETCH_EMAILS");
-    assert_eq!(calls[0].arguments["label_ids"], serde_json::json!(["INBOX"]));
+    assert_eq!(
+        calls[0].arguments["label_ids"],
+        serde_json::json!(["INBOX"])
+    );
     assert_eq!(calls[0].arguments["max_results"], 2);
 }
 

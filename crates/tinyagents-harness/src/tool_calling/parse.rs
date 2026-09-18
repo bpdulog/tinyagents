@@ -297,7 +297,10 @@ fn normalize_dsml_tool_calls(s: &str) -> Cow<'_, str> {
         out.push_str(&s[cursor..block_start]);
 
         let block_match = DSML_CALLS_BLOCK_RE.captures(&s[block_start..block_end]);
-        let inner = block_match.and_then(|c| c.get(1)).map(|m| m.as_str()).unwrap_or("");
+        let inner = block_match
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str())
+            .unwrap_or("");
 
         let mut recovered_any = false;
         for inv_cap in DSML_INVOKE_RE.captures_iter(inner) {
